@@ -2,14 +2,14 @@
 
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
 import Link from "next/link";
 import { Logo, buttonStyles, Card } from "@/components/ui";
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get("callbackUrl") ?? "/dashboard";
+  const explicitCallbackUrl = searchParams.get("callbackUrl");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -27,12 +27,19 @@ function LoginForm() {
       redirect: false,
     });
 
-    setLoading(false);
     if (result?.error) {
+      setLoading(false);
       setError("Incorrect email or password.");
       return;
     }
-    router.push(callbackUrl);
+
+    // No explicit destination (e.g. redirected here by a protected route)?
+    // Send admins to /admin and everyone else to /dashboard.
+    const session = await getSession();
+    const destination = explicitCallbackUrl ?? (session?.user.role === "ADMIN" ? "/admin" : "/dashboard");
+
+    setLoading(false);
+    router.push(destination);
     router.refresh();
   }
 
