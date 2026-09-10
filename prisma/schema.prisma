@@ -1,0 +1,297 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  RESPONDENT
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  NON_BINARY
+  PREFER_NOT_TO_SAY
+}
+
+enum EmploymentStatus {
+  EMPLOYED_FULL_TIME
+  EMPLOYED_PART_TIME
+  SELF_EMPLOYED
+  UNEMPLOYED
+  STUDENT
+  RETIRED
+  OTHER
+}
+
+enum EducationLevel {
+  PRIMARY
+  SECONDARY
+  VOCATIONAL
+  UNDERGRADUATE
+  POSTGRADUATE
+  OTHER
+}
+
+enum IncomeBracket {
+  LOW
+  LOWER_MIDDLE
+  MIDDLE
+  UPPER_MIDDLE
+  HIGH
+  PREFER_NOT_TO_SAY
+}
+
+enum SurveyProviderType {
+  MANUAL
+  SURVEYMONKEY
+}
+
+enum SurveyStatus {
+  DRAFT
+  PUBLISHED
+  PAUSED
+  CLOSED
+}
+
+enum ParticipationStatus {
+  AVAILABLE
+  STARTED
+  COMPLETED
+  REJECTED
+  SCREENED_OUT
+  EXPIRED
+}
+
+enum PointTransactionType {
+  EARNED
+  REDEMPTION
+  REVERSAL
+  BONUS
+  ADJUSTMENT
+}
+
+enum RewardRedemptionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  FULFILLED
+}
+
+// ---------------------------------------------------------------------------
+// Core models
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String
+  firstName     String
+  lastName      String
+  role          UserRole  @default(RESPONDENT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastActiveAt  DateTime?
+
+  profile           Profile?
+  participations     Participation[]
+  pointTransactions PointTransaction[]
+  rewardRedemptions RewardRedemption[]
+  createdSurveys    Survey[]            @relation("SurveyCreatedBy")
+
+  @@index([role])
+}
+
+/// Extensible profiling data used for eligibility targeting. New profiling
+/// questions can be added as columns (or moved to a key/value extension
+/// model later) without touching the User model.
+model Profile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  dateOfBirth      DateTime?
+  gender           Gender?
+  country          String? // ISO 3166-1 alpha-2 country code
+  region           String? // free-text region/city
+  employmentStatus EmploymentStatus?
+  householdSize    Int?
+  education        EducationLevel?
+  incomeBracket    IncomeBracket?
+  interests        String[] @default([]) // consumer categories / interests
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// A configured external (or future in-house) survey provider integration.
+/// V1 ships MANUAL (generic external URL) and a lightweight SURVEYMONKEY
+/// profile; more providers can be added without changing the Survey model.
+model SurveyProvider {
+  id       String             @id @default(cuid())
+  type     SurveyProviderType
+  name     String
+  metadata Json? // provider-specific config, e.g. SurveyMonkey API keys reference
+
+  surveys Survey[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Survey {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  client      String? // research client name
+  category    String // topic/category, e.g. "Shopping"
+
+  estimatedMinutes Int
+  rewardPoints     Int
+
+  providerId        String
+  provider          SurveyProvider @relation(fields: [providerId], references: [id])
+  externalUrl       String
+  externalSurveyId  String? // e.g. SurveyMonkey survey id
+  completionUrl     String? // redirect target the provider sends users to on completion
+  providerMetadata  Json? // free-form provider-specific metadata (import source, etc.)
+
+  status SurveyStatus @default(DRAFT)
+
+  startDate DateTime?
+  endDate   DateTime?
+
+  maxResponses Int? // null = unlimited
+
+  createdById String?
+  createdBy   User?   @relation("SurveyCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  eligibility    SurveyEligibility?
+  participations Participation[]
+
+  @@index([status])
+}
+
+/// Basic eligibility targeting criteria for a survey. One-to-one with
+/// Survey for V1; kept as its own model so richer multi-rule targeting can
+/// be layered on later without migrating Survey itself.
+model SurveyEligibility {
+  id       String @id @default(cuid())
+  surveyId String @unique
+  survey   Survey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+
+  countries String[] @default([]) // ISO country codes; empty = all countries
+  minAge    Int?
+  maxAge    Int?
+  genders   Gender[] @default([]) // empty = all genders
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// One respondent's attempt at one survey. This is the source of truth for
+/// completion tracking, duplicate-prevention and future fraud analysis.
+model Participation {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  surveyId String
+  survey   Survey @relation(fields: [surveyId], references: [id])
+
+  status ParticipationStatus @default(STARTED)
+
+  rewardPoints Int? // points actually awarded on completion (snapshot, server-decided)
+
+  provider           SurveyProviderType
+  externalResponseId String? // provider's response/completion identifier, when available
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  // Basic, privacy-safe metadata captured for future fraud-prevention rules.
+  ipHash    String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pointTransaction PointTransaction?
+
+  @@unique([userId, surveyId])
+  @@index([surveyId, status])
+}
+
+/// Every XP movement is recorded here; a user's balance is always derived
+/// by summing this ledger rather than stored/mutated directly.
+model PointTransaction {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  amount Int // positive = earned/bonus, negative = redemption/reversal
+  type   PointTransactionType
+  reason String // short human-readable description
+
+  participationId String?         @unique
+  participation   Participation?  @relation(fields: [participationId], references: [id])
+  redemptionId    String?         @unique
+  redemption      RewardRedemption? @relation(fields: [redemptionId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Reward {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  xpCost      Int
+  active      Boolean @default(true)
+
+  redemptions RewardRedemption[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RewardRedemption {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  rewardId String
+  reward   Reward @relation(fields: [rewardId], references: [id])
+
+  xpCost Int // snapshot of reward cost at redemption time
+  status RewardRedemptionStatus @default(PENDING)
+
+  requestedAt DateTime  @default(now())
+  decidedAt   DateTime?
+  fulfilledAt DateTime?
+
+  pointTransaction PointTransaction?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
